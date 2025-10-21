@@ -1,0 +1,813 @@
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              KAFKA EVENT-DRIVEN TRAFFIC PREDICTION SYSTEM                   │
+│           Real-time Processing with Dual Writes & Event Streaming           │
+│                        For Bachelor Thesis Project                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                           SYSTEM OVERVIEW
+═══════════════════════════════════════════════════════════════════════════════
+
+ARCHITECTURE TYPE: Event-Driven with Kafka Streaming
+
+DATA FLOW:
+  HERE API → Producer → Kafka Topics → Consumers → Redis/PostgreSQL → FastAPI → Users
+
+KAFKA TOPICS:
+  1. traffic-raw           : Raw traffic data from HERE API
+  2. traffic-predictions   : ML model predictions (10, 20, 30 min ahead)
+  3. route-updates         : Updated road graph weights
+  4. traffic-notifications : Alerts for congestion/accidents
+
+DUAL WRITES:
+  - Traffic data: PostgreSQL (historical) + Kafka (real-time stream)
+  - Predictions: PostgreSQL (evaluation) + Kafka (downstream consumers)
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    LAYER 1: DATA COLLECTION & PRODUCTION
+═══════════════════════════════════════════════════════════════════════════════
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  Service: Traffic Data Producer (traffic_producer.py)                 │
+│  Schedule: Runs every 5 minutes (cron/systemd)                        │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  Step 1: Fetch Traffic Data                                           │
+│    Source: HERE Traffic API (Hanoi bounding box)                      │
+│    Data: road_id, speed, jam_factor, coordinates, timestamp           │
+│                                                                         │
+│  Step 2: Preprocess                                                    │
+│    - Add timestamp, road_id mapping                                    │
+│    - Calculate congestion_level (Green/Yellow/Red)                    │
+│    - Calculate speed_ratio = current_speed / free_flow_speed         │
+│    - Flag is_rush_hour (7-9 AM, 5-7 PM)                              │
+│                                                                         │
+│  Step 3: DUAL WRITE ⚡                                                │
+│    A. Write to PostgreSQL (traffic_data table)                        │
+│       Purpose: Historical storage, batch training                     │
+│                                                                         │
+│    B. Publish to Kafka Topic: "traffic-raw"                           │
+│       Purpose: Real-time consumers                                     │
+│       Message format:                                                  │
+│       {                                                                │
+│         "event_id": "uuid",                                           │
+│         "timestamp": "2025-10-20T15:30:00Z",                         │
+│         "road_id": "hanoi_rd_1234",                                   │
+│         "road_name": "Pho Tran Phu",                                  │
+│         "current_speed": 25.5,                                        │
+│         "free_flow_speed": 45.0,                                      │
+│         "jam_factor": 2.3,                                            │
+│         "congestion_level": "moderate",                               │
+│         "coordinates": [...]                                          │
+│       }                                                                │
+│                                                                         │
+│  Execution Time: ~15 seconds                                          │
+│  Output: PostgreSQL record + Kafka event published ✅                 │
+└────────────────────────────────────────────────────────────────────────┘
+
+Technologies: Python, requests, psycopg2, kafka-python
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    LAYER 2: KAFKA MESSAGE BROKER
+═══════════════════════════════════════════════════════════════════════════════
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  Apache Kafka Cluster                                                  │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  TOPIC 1: traffic-raw                                                  │
+│  ───────────────────────────────────────────────────────────────────   │
+│    Partitions: 1 (simple setup for thesis)                            │
+│    Retention: 7 days                                                   │
+│    Producer: traffic_producer.py                                       │
+│    Consumers: ml_prediction_consumer.py                                │
+│    Purpose: Stream raw traffic data for ML inference                  │
+│                                                                         │
+│  TOPIC 2: traffic-predictions                                          │
+│  ───────────────────────────────────────────────────────────────────   │
+│    Partitions: 1                                                       │
+│    Retention: 24 hours                                                 │
+│    Producer: ml_prediction_consumer.py                                 │
+│    Consumers: route_graph_consumer.py, notification_consumer.py       │
+│    Purpose: Stream ML predictions to downstream services              │
+│    Message format:                                                     │
+│      {                                                                 │
+│        "event_id": "uuid",                                            │
+│        "timestamp": "2025-10-20T15:30:15Z",                          │
+│        "road_id": "hanoi_rd_1234",                                    │
+│        "current_speed": 25.5,                                         │
+│        "predicted_speed_10min": 22.0,                                 │
+│        "predicted_speed_20min": 18.5,                                 │
+│        "predicted_speed_30min": 15.0,                                 │
+│        "prediction_confidence": 0.87                                  │
+│      }                                                                 │
+│                                                                         │
+│  TOPIC 3: route-updates                                               │
+│  ───────────────────────────────────────────────────────────────────   │
+│    Partitions: 1                                                       │
+│    Retention: 1 hour                                                   │
+│    Producer: route_graph_consumer.py                                   │
+│    Consumers: notification_consumer.py (optional)                      │
+│    Purpose: Signal that road graph has been updated in Redis          │
+│    Message format:                                                     │
+│      {                                                                 │
+│        "event_id": "uuid",                                            │
+│        "timestamp": "2025-10-20T15:30:20Z",                          │
+│        "graph_version": "v20251020153020",                           │
+│        "roads_updated": 1247,                                         │
+│        "update_type": "predictions_applied"                           │
+│      }                                                                 │
+│                                                                         │
+│  TOPIC 4: traffic-notifications                                       │
+│  ───────────────────────────────────────────────────────────────────   │
+│    Partitions: 1                                                       │
+│    Retention: 1 hour                                                   │
+│    Producer: notification_consumer.py                                  │
+│    Consumers: websocket_server.py (for pushing to users)              │
+│    Purpose: Send alerts about heavy congestion                        │
+│    Message format:                                                     │
+│      {                                                                 │
+│        "event_id": "uuid",                                            │
+│        "timestamp": "2025-10-20T15:30:25Z",                          │
+│        "alert_type": "heavy_congestion",                              │
+│        "road_id": "hanoi_rd_1234",                                    │
+│        "road_name": "Pho Tran Phu",                                   │
+│        "severity": "high",                                            │
+│        "message": "Heavy traffic on Pho Tran Phu. ETA +15 minutes",  │
+│        "affected_routes": [...]                                       │
+│      }                                                                 │
+└────────────────────────────────────────────────────────────────────────┘
+
+Technologies: Apache Kafka, Zookeeper
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    LAYER 3: KAFKA CONSUMERS (Event Processors)
+═══════════════════════════════════════════════════════════════════════════════
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  CONSUMER 1: ML Prediction Service (ml_prediction_consumer.py)        │
+│  Consumes: traffic-raw                                                 │
+│  Produces: traffic-predictions                                         │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  Process:                                                              │
+│    1. Read traffic event from Kafka topic "traffic-raw"               │
+│    2. Load LSTM model (traffic_lstm_model.h5)                         │
+│    3. Prepare features: [hour, day_of_week, historical_speed, ...]   │
+│    4. Run inference → Get predictions (10, 20, 30 min ahead)         │
+│    5. DUAL WRITE:                                                      │
+│       A. Save to PostgreSQL (predictions table)                       │
+│       B. Publish to Kafka topic "traffic-predictions"                 │
+│                                                                         │
+│  Processing Time: ~5-10ms per event                                   │
+│  Consumer Group: ml-prediction-group                                   │
+│  Commit Strategy: Auto-commit after successful dual write             │
+│                                                                         │
+│  Code Pattern:                                                         │
+│    while True:                                                         │
+│        msg = consumer.poll(timeout=1.0)                               │
+│        traffic_data = parse_message(msg)                              │
+│        predictions = lstm_model.predict(traffic_data)                 │
+│                                                                         │
+│        # Dual write                                                    │
+│        save_to_postgres(predictions)  # Historical record             │
+│        publish_to_kafka(predictions)   # Trigger downstream           │
+│                                                                         │
+│        consumer.commit()  # Acknowledge processed                     │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  CONSUMER 2: Route Graph Updater (route_graph_consumer.py)           │
+│  Consumes: traffic-predictions                                         │
+│  Produces: route-updates                                               │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  Process:                                                              │
+│    1. Read prediction event from Kafka topic "traffic-predictions"    │
+│    2. Load road graph from Redis (or cache in memory)                │
+│    3. Update edge weights using predicted speeds:                     │
+│       weight = road_length / predicted_speed_10min                    │
+│    4. Write updated graph to Redis:                                   │
+│       Key: "graph:hanoi:current"                                      │
+│       Value: Serialized NetworkX graph with updated weights          │
+│    5. Publish to Kafka topic "route-updates" (notification)          │
+│                                                                         │
+│  Processing Time: ~10ms per event                                     │
+│  Consumer Group: route-graph-group                                     │
+│  Optimization: Batch updates (collect 100 predictions, update once)   │
+│                                                                         │
+│  Code Pattern:                                                         │
+│    batch = []                                                          │
+│    while True:                                                         │
+│        msg = consumer.poll(timeout=1.0)                               │
+│        batch.append(parse_message(msg))                               │
+│                                                                         │
+│        if len(batch) >= 100:  # Batch optimization                   │
+│            graph = load_graph_from_redis()                            │
+│            for prediction in batch:                                    │
+│                update_edge_weight(graph, prediction)                  │
+│            save_graph_to_redis(graph)                                 │
+│            publish_route_update_event()                               │
+│            batch.clear()                                               │
+│            consumer.commit()                                           │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  CONSUMER 3: Notification Service (notification_consumer.py)          │
+│  Consumes: traffic-predictions                                         │
+│  Produces: traffic-notifications                                       │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  Process:                                                              │
+│    1. Read prediction from Kafka topic "traffic-predictions"          │
+│    2. Analyze for notification triggers:                              │
+│       - If predicted_speed < 15 km/h → Heavy congestion               │
+│       - If speed drops > 50% in 10 min → Sudden jam                  │
+│       - If jam_factor > 3.0 → Severe traffic                          │
+│    3. Generate alert message                                           │
+│    4. Publish to Kafka topic "traffic-notifications"                  │
+│    5. (Optional) Write to PostgreSQL (notifications table)            │
+│                                                                         │
+│  Processing Time: ~5ms per event                                      │
+│  Consumer Group: notification-group                                    │
+│                                                                         │
+│  Code Pattern:                                                         │
+│    while True:                                                         │
+│        msg = consumer.poll(timeout=1.0)                               │
+│        prediction = parse_message(msg)                                │
+│                                                                         │
+│        if should_alert(prediction):                                    │
+│            alert = create_alert(prediction)                           │
+│            publish_to_kafka(alert)  # traffic-notifications           │
+│            # WebSocket server will consume this and push to users    │
+│                                                                         │
+│        consumer.commit()                                               │
+└────────────────────────────────────────────────────────────────────────┘
+
+Technologies: kafka-python, TensorFlow/Keras, NetworkX, Redis
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    LAYER 4: STORAGE LAYER
+═══════════════════════════════════════════════════════════════════════════════
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  PostgreSQL Database (Long-term Storage)                               │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  TABLE 1: traffic_data                                                 │
+│    Columns: id, road_id, timestamp, speed, jam_factor,                │
+│             congestion_level, speed_ratio, is_rush_hour               │
+│    Indexes: (road_id, timestamp), (timestamp)                         │
+│    Purpose: Historical traffic data for batch training                │
+│    Written by: traffic_producer.py (dual write)                       │
+│                                                                         │
+│  TABLE 2: predictions                                                  │
+│    Columns: id, road_id, timestamp, predicted_speed_10min,            │
+│             predicted_speed_20min, predicted_speed_30min,             │
+│             prediction_confidence, created_at                         │
+│    Indexes: (road_id, timestamp)                                      │
+│    Purpose: Model evaluation, accuracy tracking                       │
+│    Written by: ml_prediction_consumer.py (dual write)                 │
+│                                                                         │
+│  TABLE 3: notifications (Optional)                                     │
+│    Columns: id, alert_type, road_id, severity, message, timestamp    │
+│    Purpose: Notification history, analytics                           │
+│    Written by: notification_consumer.py                               │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  Redis Cache (Real-time Access)                                       │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  KEY-VALUE STORE:                                                      │
+│                                                                         │
+│    Key: road:{road_id}:current                                        │
+│    Value: JSON {speed, jam_factor, timestamp, congestion_level}      │
+│    TTL: 10 minutes                                                     │
+│    Purpose: Latest traffic status for map display                     │
+│                                                                         │
+│    Key: road:{road_id}:predicted                                      │
+│    Value: JSON {speed_10min, speed_20min, speed_30min, confidence}   │
+│    TTL: 30 minutes                                                     │
+│    Purpose: Predictions for route calculation                         │
+│                                                                         │
+│    Key: graph:hanoi:current                                           │
+│    Value: Serialized NetworkX graph (pickled)                         │
+│    TTL: No expiration (updated on every route-update event)          │
+│    Purpose: Road network with predicted speeds as edge weights       │
+│    Written by: route_graph_consumer.py                                │
+│                                                                         │
+│    Key: route:cache:{origin}:{destination}                            │
+│    Value: JSON {route_waypoints, eta, distance}                       │
+│    TTL: 5 minutes                                                      │
+│    Purpose: Cache frequently requested routes                         │
+└────────────────────────────────────────────────────────────────────────┘
+
+Technologies: PostgreSQL 14+, Redis 7+
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    LAYER 5: BATCH PROCESSING (ML Training)
+═══════════════════════════════════════════════════════════════════════════════
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  ML Model Training Service (train_model.py)                           │
+│  Schedule: Weekly (Sunday 2:00 AM via cron)                           │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  BATCH PROCESSING (NOT real-time, uses PostgreSQL):                   │
+│                                                                         │
+│  Step 1: Data Extraction                                              │
+│    Query PostgreSQL: SELECT * FROM traffic_data                       │
+│                     WHERE timestamp > NOW() - INTERVAL '4 weeks'      │
+│    Result: 4 weeks of historical traffic patterns                     │
+│                                                                         │
+│  Step 2: Feature Engineering                                          │
+│    Create features:                                                    │
+│      - hour_of_day (0-23)                                             │
+│      - day_of_week (0-6)                                              │
+│      - is_weekend (boolean)                                           │
+│      - is_rush_hour (boolean)                                         │
+│      - historical_avg_speed (rolling mean)                            │
+│      - speed_variance (rolling std)                                   │
+│                                                                         │
+│  Step 3: Model Training                                               │
+│    Architecture: LSTM(64) → Dropout(0.2) → Dense(32) → Dense(3)     │
+│    Input: Last 12 timesteps (1 hour of history)                      │
+│    Output: [speed_10min, speed_20min, speed_30min]                   │
+│    Loss: Mean Squared Error (MSE)                                     │
+│    Optimizer: Adam (lr=0.001)                                         │
+│    Epochs: 50                                                          │
+│    Validation Split: 80/20                                            │
+│                                                                         │
+│  Step 4: Model Evaluation                                             │
+│    Query predictions table for accuracy metrics                       │
+│    Calculate: MAE, RMSE, R² score                                    │
+│    Compare with previous model version                                │
+│                                                                         │
+│  Step 5: Model Deployment                                             │
+│    Save: traffic_lstm_model.h5                                        │
+│    Hot-reload in ml_prediction_consumer.py                            │
+│    Log: Model version, accuracy metrics                               │
+│                                                                         │
+│  Execution Time: 2-4 hours (depends on data size)                    │
+│  No Kafka involved - Pure batch processing ✅                         │
+└────────────────────────────────────────────────────────────────────────┘
+
+Technologies: TensorFlow/Keras, pandas, NumPy, scikit-learn
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    LAYER 6: APPLICATION LAYER (User-Facing)
+═══════════════════════════════════════════════════════════════════════════════
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  FastAPI Backend (api_server.py)                                      │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  ENDPOINT 1: GET /traffic/current                                      │
+│  ────────────────────────────────────────────────────────────────────  │
+│    Purpose: Get current traffic status for all roads                  │
+│    Data Source: Redis (road:{road_id}:current)                        │
+│    Response Time: ~50ms                                                │
+│    Used By: Live traffic map                                          │
+│                                                                         │
+│    Returns:                                                            │
+│      [                                                                 │
+│        {                                                               │
+│          "road_id": "hanoi_rd_1234",                                  │
+│          "road_name": "Pho Tran Phu",                                 │
+│          "current_speed": 25.5,                                       │
+│          "jam_factor": 2.3,                                           │
+│          "congestion_level": "moderate",                              │
+│          "last_updated": "2025-10-20T15:30:00Z"                      │
+│        },                                                              │
+│        ...                                                             │
+│      ]                                                                 │
+│                                                                         │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  ENDPOINT 2: POST /route/recommend                                     │
+│  ────────────────────────────────────────────────────────────────────  │
+│    Purpose: Calculate optimal route with predicted traffic            │
+│    Data Source: Redis (graph:hanoi:current - updated by Kafka!)       │
+│    Response Time: ~100ms                                               │
+│    Algorithm: Dijkstra's shortest path                                │
+│                                                                         │
+│    Request Body:                                                       │
+│      {                                                                 │
+│        "origin": {"lat": 21.0285, "lng": 105.8542},                  │
+│        "destination": {"lat": 21.0452, "lng": 105.8345},             │
+│        "departure_time": "now"  // or specific time                  │
+│      }                                                                 │
+│                                                                         │
+│    Process:                                                            │
+│      1. Check route cache first (route:cache:{origin}:{dest})        │
+│      2. If cache miss:                                                │
+│         a. Load graph from Redis (has predicted speeds!)             │
+│         b. Find nearest nodes to origin/destination                  │
+│         c. Run Dijkstra with edge weights = length/predicted_speed   │
+│         d. Generate 3 alternative routes (2nd, 3rd best paths)       │
+│         e. Calculate ETAs using predicted speeds                      │
+│         f. Cache result for 5 minutes                                 │
+│      3. Return routes                                                  │
+│                                                                         │
+│    Returns:                                                            │
+│      {                                                                 │
+│        "recommended_route": {                                         │
+│          "waypoints": [{lat, lng, road_name}, ...],                  │
+│          "distance_km": 4.2,                                          │
+│          "eta_minutes": 18,                                           │
+│          "congestion_summary": "Moderate on Kim Ma"                  │
+│        },                                                              │
+│        "alternatives": [...]                                          │
+│      }                                                                 │
+│                                                                         │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  ENDPOINT 3: GET /analytics/trends                                     │
+│  ────────────────────────────────────────────────────────────────────  │
+│    Purpose: Historical analytics for charts                           │
+│    Data Source: PostgreSQL (traffic_data table)                       │
+│    Response Time: ~500ms (complex aggregations)                       │
+│                                                                         │
+│    Returns:                                                            │
+│      {                                                                 │
+│        "hourly_avg_speed": [{hour: 0, speed: 35}, ...],              │
+│        "rush_hour_patterns": {...},                                   │
+│        "top_congested_roads": [...]                                   │
+│      }                                                                 │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  WebSocket Server (websocket_server.py) - For Real-time Notifications│
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  Purpose: Push traffic notifications to connected users               │
+│  Consumes: Kafka topic "traffic-notifications"                        │
+│  Technology: FastAPI WebSockets / Socket.IO                           │
+│                                                                         │
+│  Process:                                                              │
+│    1. User opens dashboard → Establishes WebSocket connection         │
+│    2. Server maintains connection pool                                │
+│    3. Kafka consumer reads from "traffic-notifications"               │
+│    4. Server broadcasts to relevant connected users                   │
+│                                                                         │
+│  Code Pattern:                                                         │
+│    active_connections = []  # WebSocket connections                   │
+│                                                                         │
+│    # Kafka consumer in background thread                             │
+│    def consume_notifications():                                       │
+│        while True:                                                     │
+│            msg = consumer.poll()                                      │
+│            notification = parse_message(msg)                          │
+│            broadcast_to_users(notification)  # Push via WebSocket    │
+│                                                                         │
+│    # WebSocket endpoint                                               │
+│    @app.websocket("/ws/notifications")                                │
+│    async def notifications_endpoint(websocket):                       │
+│        active_connections.append(websocket)                           │
+│        while True:                                                     │
+│            await websocket.receive_text()  # Keep alive              │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  Streamlit Dashboard (dashboard.py)                                   │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  PAGE 1: Live Traffic Map                                             │
+│    - Folium map with roads colored by congestion_level               │
+│    - Auto-refresh every 30 seconds (polls /traffic/current)          │
+│    - Click road → Show details (speed, predictions)                  │
+│                                                                         │
+│  PAGE 2: Route Finder                                                 │
+│    - Input: origin, destination (map click or autocomplete)          │
+│    - Button: "Find Best Route"                                        │
+│    - Calls: POST /route/recommend                                     │
+│    - Shows: Main route + 2 alternatives with ETAs                    │
+│    - Map overlay: Blue line (recommended), gray lines (alternatives) │
+│                                                                         │
+│  PAGE 3: Analytics Dashboard                                          │
+│    - Chart 1: Hourly average speed (line chart)                      │
+│    - Chart 2: Rush hour heatmap                                       │
+│    - Chart 3: Most congested roads (bar chart)                       │
+│    - Data from: GET /analytics/trends                                 │
+│                                                                         │
+│  PAGE 4: Live Notifications (Optional)                                │
+│    - WebSocket connection to /ws/notifications                        │
+│    - Shows alerts as they arrive in real-time                        │
+│    - Toast notifications for severe traffic                          │
+└────────────────────────────────────────────────────────────────────────┘
+
+Technologies: FastAPI, WebSockets, Streamlit, Folium, Plotly
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    COMPLETE EVENT FLOW (Step-by-Step)
+═══════════════════════════════════════════════════════════════════════════════
+
+TIMELINE: What happens every 5 minutes
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Time: 15:30:00
+┌─────────────────────────────────────────────────────────────────────┐
+│ EVENT 1: Data Collection                                            │
+│ ──────────────────────────────────────────────────────────────────  │
+│ Service: traffic_producer.py                                        │
+│ Action:                                                              │
+│   1. Fetch traffic from HERE API (1247 roads in Hanoi)             │
+│   2. Preprocess data (add features, calculate metrics)              │
+│   3. DUAL WRITE:                                                     │
+│      A. Insert into PostgreSQL → traffic_data table                │
+│      B. Publish to Kafka → Topic: "traffic-raw"                    │
+│ Duration: ~15 seconds                                                │
+│ Output: 1247 events in Kafka topic "traffic-raw" ✅                │
+└─────────────────────────────────────────────────────────────────────┘
+          ↓
+Time: 15:30:15
+┌─────────────────────────────────────────────────────────────────────┐
+│ EVENT 2: ML Prediction                                              │
+│ ──────────────────────────────────────────────────────────────────  │
+│ Service: ml_prediction_consumer.py                                  │
+│ Action:                                                              │
+│   1. Consume from Kafka topic "traffic-raw"                        │
+│   2. For each road event:                                           │
+│      - Load LSTM model                                              │
+│      - Run inference → Get predictions (10, 20, 30 min)            │
+│   3. DUAL WRITE:                                                     │
+│      A. Insert into PostgreSQL → predictions table                 │
+│      B. Publish to Kafka → Topic: "traffic-predictions"            │
+│ Duration: ~10 seconds (parallel processing)                         │
+│ Output: 1247 prediction events in "traffic-predictions" ✅         │
+└─────────────────────────────────────────────────────────────────────┘
+          ↓
+Time: 15:30:25
+┌─────────────────────────────────────────────────────────────────────┐
+│ EVENT 3: Route Graph Update                                         │
+│ ──────────────────────────────────────────────────────────────────  │
+│ Service: route_graph_consumer.py                                    │
+│ Action:                                                              │
+│   1. Consume from Kafka topic "traffic-predictions"                │
+│   2. Batch 100 predictions at a time                                │
+│   3. Load road graph from Redis                                     │
+│   4. Update edge weights: weight = length / predicted_speed_10min  │
+│   5. Save updated graph to Redis → Key: "graph:hanoi:current"     │
+│   6. Publish to Kafka → Topic: "route-updates"                     │
+│ Duration: ~5 seconds                                                 │
+│ Output: Updated graph in Redis + route-update event ✅             │
+└─────────────────────────────────────────────────────────────────────┘
+          ↓
+Time: 15:30:30
+┌─────────────────────────────────────────────────────────────────────┐
+│ EVENT 4: Notification Generation                                    │
+│ ──────────────────────────────────────────────────────────────────  │
+│ Service: notification_consumer.py                                   │
+│ Action:                                                              │
+│   1. Consume from Kafka topic "traffic-predictions"                │
+│   2. Check alert conditions:                                        │
+│      - predicted_speed < 15 km/h? → Heavy congestion alert         │
+│      - speed drop > 50%? → Sudden jam alert                        │
+│   3. Generate alert messages                                        │
+│   4. Publish to Kafka → Topic: "traffic-notifications"             │
+│ Duration: ~3 seconds                                                 │
+│ Output: Alert events in "traffic-notifications" ✅                 │
+└─────────────────────────────────────────────────────────────────────┘
+          ↓
+Time: 15:30:33
+┌─────────────────────────────────────────────────────────────────────┐
+│ EVENT 5: User Notification                                          │
+│ ──────────────────────────────────────────────────────────────────  │
+│ Service: websocket_server.py                                        │
+│ Action:                                                              │
+│   1. Consume from Kafka topic "traffic-notifications"              │
+│   2. Broadcast to connected users via WebSocket                     │
+│   3. User sees toast notification: "Heavy traffic on Tran Phu"     │
+│ Duration: Instant                                                    │
+│ Output: Real-time notification to users ✅                          │
+└─────────────────────────────────────────────────────────────────────┘
+
+TOTAL END-TO-END LATENCY: ~33 seconds from data collection to user notification!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+USER INTERACTION (Anytime, independent of batch cycles):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Time: 15:35:00 (User requests route)
+┌─────────────────────────────────────────────────────────────────────┐
+│ User: "Route from A to B please"                                    │
+│ ──────────────────────────────────────────────────────────────────  │
+│ Service: FastAPI api_server.py                                      │
+│ Action:                                                              │
+│   1. Receive POST /route/recommend request                          │
+│   2. Check cache: route:cache:A:B (miss)                           │
+│   3. Load graph from Redis: "graph:hanoi:current"                  │
+│      ✅ This graph has weights updated by route_graph_consumer!    │
+│   4. Run Dijkstra algorithm with predicted speeds                  │
+│   5. Calculate ETA, generate alternatives                           │
+│   6. Cache result for 5 minutes                                     │
+│   7. Return JSON response                                            │
+│ Duration: ~100ms                                                     │
+│ Output: Route with ETA based on latest predictions ✅               │
+└─────────────────────────────────────────────────────────────────────┘
+
+The route uses predictions that were calculated ~5 minutes ago (15:30),
+which is perfectly acceptable for navigation!
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    DEPLOYMENT & ORCHESTRATION
+═══════════════════════════════════════════════════════════════════════════════
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  Docker Compose Setup (docker-compose.yml)                            │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  services:                                                             │
+│    zookeeper:                                                          │
+│      image: confluentinc/cp-zookeeper:latest                          │
+│                                                                         │
+│    kafka:                                                              │
+│      image: confluentinc/cp-kafka:latest                              │
+│      depends_on: [zookeeper]                                          │
+│      environment:                                                      │
+│        KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092            │
+│                                                                         │
+│    postgres:                                                           │
+│      image: postgres:14                                               │
+│      volumes: [./data/postgres:/var/lib/postgresql/data]             │
+│                                                                         │
+│    redis:                                                              │
+│      image: redis:7-alpine                                            │
+│                                                                         │
+│    traffic-producer:                                                   │
+│      build: ./services/producer                                       │
+│      command: python traffic_producer.py                              │
+│      depends_on: [kafka, postgres]                                    │
+│                                                                         │
+│    ml-prediction-consumer:                                             │
+│      build: ./services/consumers                                      │
+│      command: python ml_prediction_consumer.py                        │
+│      depends_on: [kafka]                                              │
+│      volumes: [./models:/app/models]                                  │
+│                                                                         │
+│    route-graph-consumer:                                               │
+│      build: ./services/consumers                                      │
+│      command: python route_graph_consumer.py                          │
+│      depends_on: [kafka, redis]                                       │
+│                                                                         │
+│    notification-consumer:                                              │
+│      build: ./services/consumers                                      │
+│      command: python notification_consumer.py                         │
+│      depends_on: [kafka]                                              │
+│                                                                         │
+│    api-server:                                                         │
+│      build: ./services/api                                            │
+│      command: uvicorn api_server:app --host 0.0.0.0 --port 8000      │
+│      ports: [8000:8000]                                                │
+│      depends_on: [redis, postgres]                                    │
+│                                                                         │
+│    websocket-server:                                                   │
+│      build: ./services/websocket                                      │
+│      command: python websocket_server.py                              │
+│      ports: [8001:8001]                                                │
+│      depends_on: [kafka]                                              │
+│                                                                         │
+│    dashboard:                                                          │
+│      build: ./services/dashboard                                      │
+│      command: streamlit run dashboard.py                              │
+│      ports: [8501:8501]                                                │
+│      depends_on: [api-server]                                         │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  Cron Jobs (for periodic tasks)                                       │
+│  ────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  # Data collection every 5 minutes                                    │
+│  */5 * * * * docker exec traffic-producer python traffic_producer.py │
+│                                                                         │
+│  # Model training weekly (Sunday 2 AM)                                │
+│  0 2 * * 0 docker exec ml-trainer python train_model.py              │
+│                                                                         │
+│  # Database backup daily                                              │
+│  0 3 * * * docker exec postgres pg_dump traffic_db > backup.sql      │
+└────────────────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PROJECT STRUCTURE
+═══════════════════════════════════════════════════════════════════════════════
+
+traffic_congestion_process/
+├── services/
+│   ├── producer/
+│   │   ├── traffic_producer.py       # Kafka producer (dual write)
+│   │   ├── config.py                 # HERE API keys, Kafka config
+│   │   └── Dockerfile
+│   │
+│   ├── consumers/
+│   │   ├── ml_prediction_consumer.py  # Consumer 1: ML inference
+│   │   ├── route_graph_consumer.py    # Consumer 2: Graph updates
+│   │   ├── notification_consumer.py   # Consumer 3: Alerts
+│   │   └── Dockerfile
+│   │
+│   ├── api/
+│   │   ├── api_server.py             # FastAPI endpoints
+│   │   ├── models.py                 # Pydantic models
+│   │   └── Dockerfile
+│   │
+│   ├── websocket/
+│   │   ├── websocket_server.py       # Real-time notifications
+│   │   └── Dockerfile
+│   │
+│   ├── dashboard/
+│   │   ├── dashboard.py              # Streamlit app
+│   │   ├── pages/
+│   │   │   ├── 1_live_map.py
+│   │   │   ├── 2_route_finder.py
+│   │   │   └── 3_analytics.py
+│   │   └── Dockerfile
+│   │
+│   └── training/
+│       ├── train_model.py            # Batch LSTM training
+│       ├── evaluate_model.py
+│       └── Dockerfile
+│
+├── ml_models/
+│   ├── traffic_lstm_model.h5         # Trained model
+│   └── model_metrics.json
+│
+├── database/
+│   ├── schema.sql                    # PostgreSQL tables
+│   └── init_db.py
+│
+├── config/
+│   ├── kafka_topics.yaml             # Topic configurations
+│   └── redis_keys.yaml
+│
+├── docker-compose.yml
+├── requirements.txt
+└── README.md
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    TECH STACK SUMMARY
+═══════════════════════════════════════════════════════════════════════════════
+
+Message Broker:     Apache Kafka + Zookeeper
+Stream Processing:  kafka-python (Python consumer/producer)
+Database:           PostgreSQL 14+ (historical storage)
+Cache:              Redis 7+ (real-time access, graph storage)
+ML Framework:       TensorFlow/Keras (LSTM model)
+Batch Training:     pandas, NumPy, scikit-learn
+Road Network:       OpenStreetMap, OSMnx, NetworkX
+Backend API:        FastAPI (REST + WebSocket)
+Dashboard:          Streamlit, Folium, Plotly
+Routing:            Dijkstra's algorithm (NetworkX)
+Containerization:   Docker, Docker Compose
+Orchestration:      Cron (scheduling), systemd (services)
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    KEY BENEFITS OF THIS ARCHITECTURE
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ EVENT-DRIVEN: Kafka decouples services, events trigger downstream processing
+✅ DUAL WRITES: Data in both PostgreSQL (historical) and Kafka (real-time)
+✅ SCALABLE: Each consumer can scale independently
+✅ FAULT-TOLERANT: Kafka guarantees message delivery, consumers can retry
+✅ REAL-TIME NOTIFICATIONS: WebSocket pushes alerts to users instantly
+✅ BATCH + STREAM: ML training uses batch, inference uses streaming
+✅ PROPER SEPARATION: Producer → Topics → Consumers → Storage → API
+✅ CACHE OPTIMIZATION: Route calculations use pre-updated graph from Redis
+✅ FOLLOWS TEACHER'S REQUIREMENTS: Kafka for predictions → graph → routes → notifications
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    ADDRESSING TUTOR'S CONCERNS
+═══════════════════════════════════════════════════════════════════════════════
+
+CONCERN: "Cascading delays with separate batch schedules"
+
+SOLUTION IN THIS ARCHITECTURE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ NO separate schedules - All consumers run CONTINUOUSLY
+✅ Event-driven processing - Predictions trigger graph updates immediately
+✅ Total latency: ~33 seconds (not 45 minutes!)
+✅ User routes use latest graph (updated every 5 minutes via Kafka events)
+
+The Kafka topics create a PIPELINE, not separate batches:
+  traffic-raw → (instant) → predictions → (instant) → graph-update → (instant) → notifications
+
+All happen within same 5-minute cycle triggered by producer!
+
+
+This architecture satisfies your teacher's requirement for Kafka while 
+maintaining low latency and real-time user experience! 🚀
