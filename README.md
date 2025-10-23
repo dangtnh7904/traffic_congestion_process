@@ -60,13 +60,35 @@ It enables **real-time congestion visualization**, **trend analysis**, and **opt
 
 ### Prerequisites
 
+
 - Apache Spark ≥ 3.0  
 - Python ≥ 3.8  
 - Java ≥ 8  
 - Kafka (optional, if using real-time streaming)  
 - Docker (for containerized deployment)
 
-### Installation
+## Installation
+
+### Extract data
+
+- Crawl the data from Here API and save as raw JSON files.
+
+### Pre Processing Setup
+
+- Using structured schema to parse the raw JSON files
+- Flatten the nested structure
+- Select needed fields
+- Geometry aggregation
+-- Consolidating and cleaning data
+
+### Processing Setup
+
+-- label the description fields with id
+-- Analyze the traffic congestion level
+-- creating the fact table by replace description with id
+-- Save the processed data to storage
+-- adding timestamp for streaming data
+
 
 ```bash
 # Clone repository
@@ -75,3 +97,4 @@ cd traffic_congestion_process
 
 # Install dependencies
 pip install -r requirements.txt
+
