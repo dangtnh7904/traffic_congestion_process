@@ -1,3 +1,5 @@
 /history
 .specstory/
 configs/api_keys.json
+data/
+.vscode/

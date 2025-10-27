@@ -51,7 +51,6 @@ def process_traffic_data(**kwargs):
     #choose only data that has confidence score above threshold
     confidence_threshold = 0.7
     clean_df = clean_df.filter(col("confidence") >= confidence_threshold)
-    
+
     # result
 
-    
