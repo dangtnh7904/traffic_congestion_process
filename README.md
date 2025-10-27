@@ -78,8 +78,7 @@ It enables **real-time congestion visualization**, **trend analysis**, and **opt
 - Using structured schema to parse the raw JSON files
 - Flatten the nested structure
 - Select needed fields
-- Geometry aggregation
--- Consolidating and cleaning data
+- Consolidating and cleanindg data
 
 ### Processing Setup
 
