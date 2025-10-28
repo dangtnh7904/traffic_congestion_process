@@ -1,10 +1,11 @@
 import requests
 import json
 import pathlib
+from airflow.hooks.base import BaseHook
+from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 
-BASE_DIR = pathlib.Path("opt/airflow/data/")
-
-def fetch_hanoi_traffic_data(run_id: str) -> str:
+#fetch traffic data for Hanoi from HERE API and save to MinIO
+def fetch_hanoi_traffic_data() -> str:
 # Load API key from configs/api_keys.json
     with open('configs/api_keys.json', 'r') as f:
         config = json.load(f)
@@ -21,24 +22,37 @@ def fetch_hanoi_traffic_data(run_id: str) -> str:
 
     response = requests.get(url)
 
+    #get the sourceUpdated time from response
+    response_json = response.json()
+    source_updated = response_json.get("sourceUpdated", "unknown_time").replace(" ", "_").replace(":", "-")
+
     #example response to test before actual API call
 
     # response = {"sourceUpdated": "2024-06-15 10:30:00", "results": [{"id": 1, "speed": 30}, {"id": 2, "speed": 25}]}
 
     if response.status_code != 200:
-        print(f"Error fetching traffic data: {response.status_code}")
-        return None
+        msg = f"Traffic API failed with {response.status_code}: {response.text[:200]}"
+        raise RuntimeError(msg)
     else:
-        traffic_data = response.json()
-        raw_file_name = "traffic_data.json" 
+        # Save to MinIO
+        bucket_name = "traffic-congestion"
+        file_key = f"raw/{source_updated}/hanoi_traffic_data.json"
 
-        save_folder = BASE_DIR / "raw" / run_id
-        save_folder.mkdir(parents=True, exist_ok=True)
+        s3_hook = S3Hook(aws_conn_id='minio_default')
 
-        raw_file_path = save_folder / raw_file_name
+        # raise error if unable to save to MinIO
+        try:
+            s3_hook.get_connection('minio_default')
+            # save to /raw/{source_updated}/hanoi_traffic_data.json
+            s3_hook.load_string(
+                string_data=json.dumps(response_json),
+                bucket_name=bucket_name,
+                object_name=file_key,
+                replace=True
+            )
+        except Exception as e:
+            raise ConnectionError("Failed to connect to MinIO. Please check your connection settings.") from e
 
-        with open(raw_file_path, 'w', encoding='utf-8') as f:
-            json.dump(traffic_data, f, ensure_ascii=False, indent=2)
-        print(f"Saved raw traffic data to: {raw_file_path}")
-
-        return str(raw_file_path)
+        # Return the S3 path for downstream tasks
+        s3_path = f"s3://{bucket_name}/{file_key}"
+        return s3_path    
