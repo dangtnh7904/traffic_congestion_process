@@ -60,7 +60,6 @@ It enables **real-time congestion visualization**, **trend analysis**, and **opt
 
 ### Prerequisites
 
-
 - Apache Spark ≥ 3.0  
 - Python ≥ 3.8  
 - Java ≥ 8  
@@ -87,7 +86,6 @@ It enables **real-time congestion visualization**, **trend analysis**, and **opt
 -- creating the fact table by replace description with id
 -- Save the processed data to storage
 -- adding timestamp for streaming data
-
 
 ```bash
 # Clone repository

@@ -52,5 +52,5 @@ def process_traffic_data(**kwargs):
     confidence_threshold = 0.7
     clean_df = clean_df.filter(col("confidence") >= confidence_threshold)
 
-    # result
-
+    # saving processed data
+    run_id = kwargs['run_id']
