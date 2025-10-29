@@ -3,3 +3,4 @@
 configs/api_keys.json
 data/
 .vscode/
+.cache/

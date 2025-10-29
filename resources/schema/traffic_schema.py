@@ -1,4 +1,3 @@
-from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, ArrayType, TimestampType
 
 # --- Định nghĩa các schema nhỏ ---

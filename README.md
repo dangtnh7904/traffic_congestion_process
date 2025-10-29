@@ -77,7 +77,8 @@ It enables **real-time congestion visualization**, **trend analysis**, and **opt
 - Using structured schema to parse the raw JSON files
 - Flatten the nested structure
 - Select needed fields
-- Consolidating and cleanindg data
+- Consolidating and cleaning data
+- Save in parquet format for further processing
 
 ### Processing Setup
 

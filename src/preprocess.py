@@ -1,5 +1,5 @@
 import json
-from dags.schema.traffic_schema import root_schema
+from resources.schema.traffic_schema import root_schema
 
 def process_traffic_data(**kwargs):
     try:
@@ -8,7 +8,7 @@ def process_traffic_data(**kwargs):
     except ImportError as e:
         raise ImportError("PySpark is not installed. Please install PySpark to use this function.") from e
 
-    spark = SparkSession.builder.appName("TrafficDataProcessing").getOrCreate()
+    spark = SparkSession.builder.appName("PreprocessTrafficData").getOrCreate()
     ti = kwargs['ti']
 
     #Fetch the s3 path from XCom
@@ -18,7 +18,7 @@ def process_traffic_data(**kwargs):
 
     # Flatten the DataFrame
     parsed_df = raw_df.selectExpr("sourceUpdated", "explode(results) as result")
-
+    
     # Flatten the DataFrame and selecting the required fields
     flattened_df = parsed_df.select(
         col("sourceUpdated").alias("timestamp"),
@@ -32,6 +32,7 @@ def process_traffic_data(**kwargs):
         col("result.currentFlow.traversability").alias("traversability"),
         col("result.currentFlow.freeFlowSpeed").alias("freeFlowSpeed")
     )
+
 
     #consolidate and clean data
     clean_df = flattened_df\
