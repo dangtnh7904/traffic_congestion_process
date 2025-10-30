@@ -1,8 +1,6 @@
 import requests
 import json
 import pathlib
-from airflow.hooks.base import BaseHook
-from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 
 #fetch traffic data for Hanoi from HERE API and save to MinIO
 def fetch_hanoi_traffic_data() -> str:
@@ -20,19 +18,22 @@ def fetch_hanoi_traffic_data() -> str:
 
     url = f"{base_url}?locationReferencing=shape&in=bbox:{bbox}&apiKey={api_key}"
 
-    response = requests.get(url)
+    # response = requests.get(url)
 
-    #get the sourceUpdated time from response
-    response_json = response.json()
+    # #get the sourceUpdated time from response
+    # response_json = response.json()
+    with open("data/raw/2025-10-22T02-57-05Z/hanoi_traffic_data.json", "r") as f:
+        response_json = json.load(f)
     source_updated = response_json.get("sourceUpdated", "unknown_time").replace(" ", "_").replace(":", "-")
 
     #example response to test before actual API call
 
     # response = {"sourceUpdated": "2024-06-15 10:30:00", "results": [{"id": 1, "speed": 30}, {"id": 2, "speed": 25}]}
 
-    if response.status_code != 200:
-        msg = f"Traffic API failed with {response.status_code}: {response.text[:200]}"
-        raise RuntimeError(msg)
+    # if response.status_code != 200:
+    if not response_json:
+        # msg = f"Traffic API failed with {response.status_code}: {response.text[:200]}"
+        raise RuntimeError("Failed to fetch traffic data from HERE API.")
     else:
         # Save to MinIO
         bucket_name = "traffic-congestion"

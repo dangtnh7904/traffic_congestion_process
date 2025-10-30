@@ -34,7 +34,6 @@ flow_schema = StructType([
     StructField("traversability", DoubleType(), True)
 ])
 
-# --- Đây là schema tổng bạn sẽ IMPORT ---
 # Cấu trúc TỔNG của mảng "results"
 result_schema = StructType([
     StructField("location", location_schema, True),

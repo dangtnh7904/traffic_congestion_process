@@ -1,8 +1,0 @@
-{
-    "jdbc_url": "jdbc:postgresql://localhost:5432/traffic_db",
-    "connection_properties": {
-    "user": "postgres",
-    "password": "postgres",
-    "driver": "org.postgresql.Driver"
-    }
-}
