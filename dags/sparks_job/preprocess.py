@@ -1,20 +1,31 @@
 # dags/spark_jobs/preprocess.py
+import argparse 
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 try:
-    import argparse 
-    import logging
     from pyspark.sql import SparkSession
     from pyspark.sql.functions import col, lit, greatest, least, when
-except ImportError as e:
-    raise ImportError("Required modules are not installed. Please install the necessary packages to run this script.") from e
 
+except ImportError as e:
+    logger.error("Required modules are not installed. Please install the necessary packages to run this script.")
+    raise
+
+# Import the schema definition
 from traffic_schema import root_schema 
 
+# Main processing function
 def run_spark_job(spark: SparkSession, input_path: str, output_path: str):
 
-    logging.info(f"Reading data from: {input_path}")
+    logger.info(f"Reading data from: {input_path}")
 
     # Read raw JSON data with predefined schema
-    raw_df = spark.read.json(input_path, schema=root_schema)
+    try:
+        raw_df = spark.read.json(input_path, schema=root_schema)
+    except Exception as e:
+        logger.error(f"Error reading JSON data from {input_path}: {e}")
+        raise
 
     # Flatten nested structures
     parsed_df = raw_df.selectExpr("sourceUpdated", "explode(results) as result")
@@ -58,17 +69,18 @@ def run_spark_job(spark: SparkSession, input_path: str, output_path: str):
     clean_df = clean_df.filter(col("confidence") >= confidence_threshold)
 
     # Write the cleaned data to Parquet
-    logging.info(f"Write parquet to: {output_path}")
+    logger.info(f"Write parquet to: {output_path}")
     clean_df.write.mode("overwrite").parquet(output_path)
 
     try:
         _ = spark.read.parquet(output_path)
-        logging.info("Read back processed data successfully.")
+        logger.info("Read back processed data successfully.")
     except Exception as e:
-        raise IOError(f"Failed to read back processed data from {output_path}") from e
+        logger.error(f"Error reading back processed data: {e}")
+        raise
     
 
-# Entry point for standalone execution
+# Main entry point
 if __name__ == "__main__":
 
     # 1. Set up to read parameters from command-line
@@ -81,7 +93,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--output-path',
         required=True,
-        help="S3 path prefix to write the processed Parquet data."
+        help="S3 path  to write the processed Parquet data."
     )
     args = parser.parse_args()
 
@@ -93,8 +105,10 @@ if __name__ == "__main__":
         run_spark_job(
             spark, 
             args.input_path, 
-            args.output_path_prefix
+            args.output_path
         )
     finally:
         # Stop Spark session 
         spark.stop()
+
+    
