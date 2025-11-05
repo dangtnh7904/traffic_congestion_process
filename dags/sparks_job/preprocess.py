@@ -47,11 +47,6 @@ def run_spark_job(spark: SparkSession, input_path: str, output_path: str):
         col("result.currentFlow.freeFlowSpeed").alias("freeFlowSpeed")
     )
 
-    #Further flatten links to linestring
-    flattened_df = flattened_df.select(flatten(transform
-                                            (col("links"), lambda x : transform_links_to_linestring(x))
-
-    ))
 
     # Data Cleaning Steps
     clean_df = flattened_df\
@@ -96,12 +91,12 @@ if __name__ == "__main__":
     # 1. Set up to read parameters from command-line
     parser = argparse.ArgumentParser(description="Spark Traffic Preprocessing Job")
     parser.add_argument(
-        '--input-path',
+        '--input_path',
         required=True,
         help="S3 path to the raw input JSON data."
     )
     parser.add_argument(
-        '--output-path',
+        '--output_path',
         required=True,
         help="S3 path  to write the processed Parquet data."
     )
