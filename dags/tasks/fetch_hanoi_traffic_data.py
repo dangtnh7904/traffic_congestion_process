@@ -6,9 +6,9 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def fetch_hanoi_traffic_data(minio_conn_id: str) -> str:
-    
-    # Import heare within the function to avoid Airflow import issues
+def fetch_hanoi_traffic_data(minio_conn_id: str, bucket_name: str) -> str:
+
+    # Import here within the function to avoid Airflow import issues
     import requests
     from airflow.providers.amazon.aws.hooks.s3 import S3Hook
     from airflow.exceptions import AirflowNotFoundException
@@ -44,15 +44,25 @@ def fetch_hanoi_traffic_data(minio_conn_id: str) -> str:
     # Extract timestamp for file naming
     source_updated = response_json.get("sourceUpdated", "unknown_time").replace(" ", "_").replace(":", "-")
     
-    # Save the response to MinIO
-    bucket_name = "traffic-congestion"
+    # define S3 path
     file_key = f"raw/{source_updated}/hanoi_traffic_data.json"
-    
+    s3_path = f"s3://{bucket_name}/{file_key}"
+
+
 
     try:
         s3_hook = S3Hook(aws_conn_id=minio_conn_id)
-        logging.info(f"Saving data to MinIO: {s3_path}")
-        
+
+        # Check if the bucket exists
+        logger.info("Checking if bucket exists")
+        if not s3_hook.check_for_bucket(bucket_name=bucket_name):
+            logger.warning(f"Bucket '{bucket_name}' not found. Creating it...")
+            s3_hook.create_bucket(bucket_name=bucket_name)
+            logger.info(f"Bucket '{bucket_name}' created.")
+
+
+        logger.info(f"Saving data to MinIO: {s3_path}")
+        # Save the JSON response to MinIO
         s3_hook.load_string(
             string_data=json.dumps(response_json),
             bucket_name=bucket_name,
@@ -69,5 +79,4 @@ def fetch_hanoi_traffic_data(minio_conn_id: str) -> str:
     logger.info(f"Successfully saved data to {s3_path}")
     
     # Return the S3 path of the saved file
-    s3_path = f"s3://{bucket_name}/{file_key}"
     return s3_path
