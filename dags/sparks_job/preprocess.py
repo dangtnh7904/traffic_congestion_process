@@ -6,14 +6,18 @@ logger = logging.getLogger(__name__)
 
 try:
     from pyspark.sql import SparkSession
-    from pyspark.sql.functions import col, lit, greatest, least, when
+    from pyspark.sql.functions import col, lit, greatest, least, when, flatten, transform
 
 except ImportError as e:
     logger.error("Required modules are not installed. Please install the necessary packages to run this script.")
     raise
 
 # Import the schema definition
-from traffic_schema import root_schema 
+try:
+    from traffic_schema import root_schema 
+except ImportError as e:
+    logger.error("Could not import traffic_schema module. Ensure traffic_schema.py is in the same directory.")
+    raise
 
 # Main processing function
 def run_spark_job(spark: SparkSession, input_path: str, output_path: str):
@@ -32,17 +36,23 @@ def run_spark_job(spark: SparkSession, input_path: str, output_path: str):
 
     # Further flattening and selecting relevant fields
     flattened_df = parsed_df.select(
-        col("sourceUpdated").alias("timestamp"),
+        col("sourceUpdated").cast("timestamp").alias("timestamp"),
         col("result.location.description").alias("road_name"),
         col("result.location.length").alias("traverse_length"),
-        col("result.location.shape").alias("shape"),
-        col("result.location.links").alias("links"),
+        col("result.location.shape.links").alias("links"),
         col("result.currentFlow.speed").alias("speed"),
         col("result.currentFlow.jamFactor").alias("jamFactor"),
         col("result.currentFlow.confidence").alias("confidence"),
         col("result.currentFlow.traversability").alias("traversability"),
         col("result.currentFlow.freeFlowSpeed").alias("freeFlowSpeed")
     )
+
+    #Further flatten links to linestring
+    flattened_df = flattened_df.select(flatten(transform
+                                            (col("links"), lambda x : transform_links_to_linestring(x))
+
+    ))
+
     # Data Cleaning Steps
     clean_df = flattened_df\
         .filter(col("speed").isNotNull() & (col("speed") > 0))\
