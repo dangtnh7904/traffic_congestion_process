@@ -6,4 +6,10 @@ data/
 **/__pycache__/
 cache/
 test.py
-road_networks.py
+road_network.py
+traffic_map_backend/node_modules/
+traffic_map_backend/.env
+
+traffic_map_app/.dart_tool/
+traffic_map_app/build/
+traffic_map_app/.packages

@@ -1,41 +1,10 @@
 # dags/sparks_job/engineer_feature_data.py
-from ast import expr
 from pyspark.sql import SparkSession
 import logging
 import argparse
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-try:
-    from pyspark.sql import SparkSession
-    from pyspark.sql.functions import col, lit, when, broadcast, udf
-    from pyspark.sql.types import StringType, ArrayType
-
-except ImportError as e:
-    logger.error("Required modules are not installed. Please install the necessary packages to run this script.")
-    raise
-
-# udf to create linestring from links
-@udf(returnType=StringType())
-def transform_links_to_linestring(links):
-    if not links or len(links) == 0:
-        return None
-    line_strings = []
-    for link in links:
-        list_points = link['points']
-        #remove duplicates within link
-        if line_strings and list_points:
-            list_points = list_points[1:]
-        for point in list_points:
-            #selecting latitude and longitude
-            latitude = point['lng']
-            longitude = point['lat']
-            line_strings.append((longitude, latitude))
-
-    return str(line_strings)
-
-build_wkt_udf = udf(transform_links_to_linestring, StringType())
 
 # Main feature engineering function
 def engineer_feature_data(spark : SparkSession, input_path: str, 
@@ -46,8 +15,34 @@ def engineer_feature_data(spark : SparkSession, input_path: str,
                             db_traffic_table: str):
     logger.info(f"Reading data from: {input_path}")
 
-    # Create session
-    spark = SparkSession.builder.appName("FeatureEngineering").getOrCreate()
+
+    # Import Spark functions AFTER SparkSession is created
+    from pyspark.sql.functions import col, lit, when, broadcast, udf, expr
+    from pyspark.sql.types import StringType, ArrayType
+
+    # Define UDF to create linestring from links (must be after SparkSession creation)
+    def transform_links_to_linestring(links):
+        if not links or len(links) == 0:
+            return None
+        line_strings = []
+        for link in links:
+            list_points = link['points']
+            #remove duplicates within link
+            if line_strings and list_points:
+                list_points = list_points[1:]
+            for point in list_points:
+                #selecting latitude and longitude
+                latitude = point['lng']
+                longitude = point['lat']
+                line_strings.append((longitude, latitude))
+        
+        # Convert to WKT LINESTRING format
+        if not line_strings:
+            return None
+        wkt_coords = ', '.join([f"{lon} {lat}" for lon, lat in line_strings])
+        return f"LINESTRING({wkt_coords})"
+
+    build_wkt_udf = udf(transform_links_to_linestring, StringType())
 
     # Read the cleaned data from S3
     try:
@@ -67,6 +62,7 @@ def engineer_feature_data(spark : SparkSession, input_path: str,
             .option("dbtable", db_label_table) \
             .option("user", db_user) \
             .option("password", db_password) \
+            .option("driver", "org.postgresql.Driver") \
             .load()
         
         logger.info("Successfully loaded existing street labels from Postgres.")
@@ -89,6 +85,9 @@ def engineer_feature_data(spark : SparkSession, input_path: str,
             .format("jdbc") \
             .option("url", jdbc_url) \
             .option("dbtable", "street_labels") \
+            .option("user", db_user) \
+            .option("password", db_password) \
+            .option("driver", "org.postgresql.Driver") \
             .mode("append") \
             .save()
         
@@ -106,6 +105,7 @@ def engineer_feature_data(spark : SparkSession, input_path: str,
             .option("dbtable", db_label_table) \
             .option("user", db_user) \
             .option("password", db_password) \
+            .option("driver", "org.postgresql.Driver") \
             .load()
         
         logger.info("Successfully reloaded street labels from Postgres.")
@@ -119,6 +119,10 @@ def engineer_feature_data(spark : SparkSession, input_path: str,
         .when((col("jamFactor") >= 4) & (col("jamFactor") < 7), lit("Medium"))
         .otherwise(lit("Low"))
     )
+    
+    # Drop street_id if it exists (to avoid duplicate after join)
+    if "street_id" in feature_df.columns:
+        feature_df = feature_df.drop("street_id")
 
     # Join with labels to get street IDs
     feature_df = feature_df.join(
@@ -139,14 +143,19 @@ def engineer_feature_data(spark : SparkSession, input_path: str,
     feature_df = feature_df.withColumn("wkt_shape", build_wkt_udf(col("links")))
 
     logger.info("Create geometry column from WKT String.")
-    # Create geometry column
-    try:
-        feature_df = feature_df.\
-            withColumn("geom", expr("ST_GeomFromText(wkt_shape, 4326)"))
-    except Exception as e:
-        logger.error(f"Error creating geometry column: {e}")
-        raise
 
+    # If we need to compute geometry column using Sedona
+    # # Create geometry column
+    # try:
+    #     feature_df = feature_df.\
+    #         withColumn("geom", expr("ST_GeomFromText(wkt_shape, 4326)"))
+    # except Exception as e:
+    #     logger.error(f"Error creating geometry column: {e}")
+    #     raise
+
+    # # Convert geometry to WKT text for PostgreSQL compatibility
+    # feature_df = feature_df.withColumn("geom_wkt", expr("ST_AsText(geom)"))
+    
     # Filter feature_df to keep only necessary columns
     feature_df = feature_df.select(
         "timestamp",
@@ -158,7 +167,7 @@ def engineer_feature_data(spark : SparkSession, input_path: str,
         "traversability",
         "freeFlowSpeed",
         "congestion_level",
-        "geom"
+        "wkt_shape"  # Use WKT string directly from UDF
     )
 
     logger
@@ -170,6 +179,7 @@ def engineer_feature_data(spark : SparkSession, input_path: str,
             .option("dbtable", db_traffic_table) \
             .option("user", db_user) \
             .option("password", db_password) \
+            .option("driver", "org.postgresql.Driver") \
             .mode("overwrite") \
             .save()
         
@@ -188,10 +198,15 @@ if __name__ == "__main__":
     parser.add_argument("--jdbc_url", required=True, help="JDBC URL for Postgres")
     parser.add_argument("--db_user", required=True, help="Database user")
     parser.add_argument("--db_password", required=True, help="Database password")
-    parser.add_argument("--db_table", required=True, help="Database table name")
+    parser.add_argument("--db_label_table", required=True, help="Database table for labels")
+    parser.add_argument("--db_traffic_table", required=True, help="Database table for traffic data")
     args = parser.parse_args()
 
-    spark = SparkSession.builder.appName("FeatureEngineering").getOrCreate()
+    # Build Spark session with Sedona extensions
+    spark = SparkSession.builder \
+        .appName("FeatureEngineering") \
+        .config("spark.sql.extensions", "org.apache.sedona.viz.sql.SedonaVizExtensions,org.apache.sedona.sql.SedonaSqlExtensions") \
+        .getOrCreate()
 
     try:
         engineer_feature_data(

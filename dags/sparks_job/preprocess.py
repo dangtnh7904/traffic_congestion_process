@@ -37,14 +37,14 @@ def run_spark_job(spark: SparkSession, input_path: str, output_path: str):
     # Further flattening and selecting relevant fields
     flattened_df = parsed_df.select(
         col("sourceUpdated").cast("timestamp").alias("timestamp"),
-        col("result.location.description").alias("road_name"),
+        col("result.location.description").alias("street_name"),
         col("result.location.length").alias("traverse_length"),
         col("result.location.shape.links").alias("links"),
         col("result.currentFlow.speed").alias("speed"),
         col("result.currentFlow.jamFactor").alias("jamFactor"),
         col("result.currentFlow.confidence").alias("confidence"),
         col("result.currentFlow.traversability").alias("traversability"),
-        col("result.currentFlow.freeFlowSpeed").alias("freeFlowSpeed")
+        col("result.currentFlow.freeFlow").alias("freeFlowSpeed")
     )
 
 
@@ -53,6 +53,13 @@ def run_spark_job(spark: SparkSession, input_path: str, output_path: str):
         .filter(col("speed").isNotNull() & (col("speed") > 0))\
         .filter(col("traverse_length") > 0)\
         .filter(col("freeFlowSpeed").isNotNull() & (col("freeFlowSpeed") > 0))
+    
+    #remove null street names
+    clean_df = clean_df\
+        .filter(col("street_name").isNotNull() & (col("street_name") != ""))
+    
+    # Fill missing traversability with default value "open"
+    clean_df = clean_df.fillna({"traversability": "open"})
     
     
     # Logic to calculate jamFactor if missing
