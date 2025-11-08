@@ -30,7 +30,7 @@ db_traffic_table = "traffic_events"
 
 default_args = {
     'owner': 'airflow',
-    'retries': False,
+    'retries': True,
     'retry_delay': 60,
 }
 
@@ -38,7 +38,7 @@ default_args = {
     dag_id='process_traffic_data_dagv12',
     default_args=default_args,
     description='DAG to process traffic data using Spark jobs',
-    schedule_interval=None,
+    schedule_interval=timedelta(seconds=360), 
     start_date=None,
     catchup=False,
     tags=['traffic', 'spark', 'data_processing'],
