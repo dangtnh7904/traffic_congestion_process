@@ -1,29 +1,44 @@
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
+require('dotenv').config();
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
 // Enable CORS để Flutter app có thể gọi API
-app.use(cors());
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || '*'
+}));
 app.use(express.json());
 
-// Kết nối PostgreSQL
+// Kết nối PostgreSQL với environment variables
 const pool = new Pool({
-  host: 'localhost',
-  port: 5432,
-  database: 'traffic_db',
-  user: 'postgres',
-  password: 'postgres',
+  host: process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.DB_PORT) || 5432,
+  database: process.env.DB_NAME || 'traffic_db',
+  user: process.env.DB_USER || 'postgres',
+  password: process.env.DB_PASSWORD || 'postgres',
+  min: parseInt(process.env.DB_POOL_MIN) || 2,
+  max: parseInt(process.env.DB_POOL_MAX) || 10,
+  idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT) || 10000,
+  connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT) || 3000,
 });
+
+// Constants from environment
+const MAX_QUERY_LIMIT = parseInt(process.env.MAX_QUERY_LIMIT) || 5000;
+const DEFAULT_QUERY_LIMIT = parseInt(process.env.DEFAULT_QUERY_LIMIT) || 200;
+const BBOX_QUERY_LIMIT = parseInt(process.env.BBOX_QUERY_LIMIT) || 500;
 
 // Test database connection
 pool.query('SELECT NOW()', (err, res) => {
   if (err) {
-    console.error('Lỗi kết nối database:', err);
+    console.error(' Lỗi kết nối database:', err.message);
+    console.error(' Kiểm tra lại thông tin trong file .env');
   } else {
-    console.log('Kết nối database thành công:', res.rows[0].now);
+    console.log(' Kết nối database thành công!');
+    console.log(` Server time: ${res.rows[0].now}`);
+    console.log(` Database: ${process.env.DB_NAME}@${process.env.DB_HOST}:${process.env.DB_PORT}`);
   }
 });
 
@@ -63,7 +78,7 @@ app.get('/api/traffic/latest', async (req, res) => {
         )
         SELECT * FROM latest_events
         ORDER BY timestamp DESC
-        LIMIT 500;
+        LIMIT ${BBOX_QUERY_LIMIT};
       `;
       queryParams = [minLon, minLat, maxLon, maxLat];
     } else {
@@ -88,7 +103,7 @@ app.get('/api/traffic/latest', async (req, res) => {
         )
         SELECT * FROM latest_events
         ORDER BY timestamp DESC
-        LIMIT 200;
+        LIMIT ${DEFAULT_QUERY_LIMIT};
       `;
     }
     
@@ -160,7 +175,7 @@ app.get('/api/traffic/range', async (req, res) => {
         AND te.timestamp >= $1
         AND te.timestamp <= $2
       ORDER BY te.timestamp DESC
-      LIMIT 5000;
+      LIMIT ${MAX_QUERY_LIMIT};
     `;
     
     const result = await pool.query(query, [start, end]);
@@ -233,6 +248,10 @@ app.get('/', (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Backend server đang chạy tại http://localhost:${port}`);
-  console.log(`API docs: http://localhost:${port}/`);
+  console.log(' ================================');
+  console.log(` Traffic Map Backend API`);
+  console.log(` Server: http://${process.env.HOST || 'localhost'}:${port}`);
+  console.log(` API docs: http://${process.env.HOST || 'localhost'}:${port}/`);
+  console.log(` Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(' ================================');
 });
