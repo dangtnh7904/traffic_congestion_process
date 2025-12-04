@@ -19,7 +19,8 @@ def fetch_hanoi_traffic_data(minio_conn_id: str, bucket_name: str) -> str:
     try:
         # get airflow variables
         api_key = Variable.get("here_api_key")
-        bbox = Variable.get("hanoi_bbox")
+        coords = Variable.get("hanoi_bbox", deserialize_json=True)
+        bbox = f"{coords['west']},{coords['south']},{coords['east']},{coords['north']}"
         # using default value if variable not set
         base_url = Variable.get("here_base_url", 
                                 default_var="https://data.traffic.hereapi.com/v7/flow")

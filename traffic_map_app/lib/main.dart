@@ -42,6 +42,14 @@ class _HanoiMapPageState extends State<HanoiMapPage> {
   Map<String, dynamic>? stats;
   Timer? _refreshTimer;
   final MapController _mapController = MapController();
+  double _currentZoom = 13.5;
+  Map<String, Color> _colorConfig = {
+    'low': const Color(0xFF00BCD4),
+    'medium': const Color(0xFFFF9800),
+    'high': const Color(0xFFE91E63),
+    'severe': const Color(0xFF9C27B0),
+    'default': const Color(0xFF2196F3),
+  };
 
   // API endpoint - 10.0.2.2 cho Android Emulator trỏ tới localhost của máy host
   static const String apiBaseUrl = 'http://10.0.2.2:3000';
@@ -73,22 +81,37 @@ class _HanoiMapPageState extends State<HanoiMapPage> {
         errorMessage = '';
       });
 
-      // Gọi API không có bbox - lấy tất cả data
-      final uri = Uri.parse('$apiBaseUrl/api/traffic/latest');
+      // Lấy bounds và zoom hiện tại của map
+      final bounds = _mapController.camera.visibleBounds;
+      final zoom = _mapController.camera.zoom;
+      
+      // Gọi API với bbox và zoom level
+      final uri = Uri.parse('$apiBaseUrl/api/traffic/latest').replace(queryParameters: {
+        'minLon': bounds.west.toString(),
+        'minLat': bounds.south.toString(),
+        'maxLon': bounds.east.toString(),
+        'maxLat': bounds.north.toString(),
+        'zoom': zoom.toString(),
+      });
 
-      print('Loading all traffic data...');
+      print('Loading traffic data for zoom $zoom, bbox: ${bounds.west},${bounds.south},${bounds.east},${bounds.north}');
       
       final response = await http.get(uri).timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
+        final remoteColors = _parseColorMetadata(data['metadata']);
         final polylines = _convertGeoJsonToPolylines(data);
 
         print('Loaded ${polylines.length} polylines');
         
         if (!mounted) return;
         setState(() {
+          if (remoteColors != null) {
+            _colorConfig = {..._colorConfig, ...remoteColors};
+          }
           trafficPolylines = polylines;
+          _currentZoom = zoom;
           isLoading = false;
         });
 
@@ -136,25 +159,28 @@ class _HanoiMapPageState extends State<HanoiMapPage> {
       final geometry = feature['geometry'];
       final properties = feature['properties'];
 
-      if (geometry['type'] == 'LineString') {
-        final coordinates = geometry['coordinates'] as List;
-        final points = coordinates
-            .map((coord) => LatLng(coord[1] as double, coord[0] as double))
-            .toList();
+      if (geometry == null) {
+        continue;
+      }
 
-        // Xác định màu sắc dựa trên congestion_level hoặc jamfactor
-        final color = _getColorForTraffic(properties);
-        final strokeWidth = _getStrokeWidth(properties);
-
-        polylines.add(
-          Polyline(
-            points: points,
-            strokeWidth: strokeWidth,
-            color: color,
-            borderColor: Colors.white.withOpacity(0.5), // Viền trắng để nổi bật
-            borderStrokeWidth: 1.5,
-          ),
-        );
+      switch (geometry['type']) {
+        case 'LineString':
+          final polyline = _buildPolyline(
+            geometry['coordinates'] as List,
+            properties,
+          );
+          if (polyline != null) polylines.add(polyline);
+          break;
+        case 'MultiLineString':
+          final lines = geometry['coordinates'] as List;
+          for (final line in lines) {
+            final polyline = _buildPolyline(line as List, properties);
+            if (polyline != null) polylines.add(polyline);
+          }
+          break;
+        default:
+          // Ignore other geometry types for now
+          break;
       }
     }
 
@@ -167,13 +193,13 @@ class _HanoiMapPageState extends State<HanoiMapPage> {
     if (congestionLevel != null) {
       switch (congestionLevel.toLowerCase()) {
         case 'low':
-          return const Color(0xFF00BCD4); // Xanh dương Cyan - thông thoáng
+          return _colorForKey('low');
         case 'medium':
-          return const Color(0xFFFF9800); // Cam đậm - hơi tắc
+          return _colorForKey('medium');
         case 'high':
-          return const Color(0xFFE91E63); // Hồng đậm - tắc
+          return _colorForKey('high');
         case 'severe':
-          return const Color(0xFF9C27B0); // Tím - tắc nghẽn nghiêm trọng
+          return _colorForKey('severe');
         default:
           break;
       }
@@ -182,14 +208,14 @@ class _HanoiMapPageState extends State<HanoiMapPage> {
     // Nếu không có congestion_level, dùng jamfactor
     final jamfactor = properties['jamfactor'] as double?;
     if (jamfactor != null) {
-      if (jamfactor < 2.0) {
-        return const Color(0xFF00BCD4); // Xanh dương Cyan - thông thoáng
-      } else if (jamfactor < 4.0) {
-        return const Color(0xFFFF9800); // Cam đậm - hơi tắc
-      } else if (jamfactor < 7.0) {
-        return const Color(0xFFE91E63); // Hồng đậm - tắc
+      if (jamfactor < 1.0) {
+        return _colorForKey('low');
+      } else if (jamfactor < 2.0) {
+        return _colorForKey('medium');
+      } else if (jamfactor < 3.0) {
+        return _colorForKey('high');
       } else {
-        return const Color(0xFF9C27B0); // Tím - tắc nghẽn
+        return _colorForKey('severe');
       }
     }
 
@@ -199,34 +225,63 @@ class _HanoiMapPageState extends State<HanoiMapPage> {
     if (speed != null && freeflowspeed != null && freeflowspeed > 0) {
       final speedRatio = speed / freeflowspeed;
       if (speedRatio > 0.7) {
-        return const Color(0xFF00BCD4); // Xanh dương Cyan
+        return _colorForKey('low');
       } else if (speedRatio > 0.4) {
-        return const Color(0xFFFF9800); // Cam đậm
+        return _colorForKey('medium');
       } else if (speedRatio > 0.2) {
-        return const Color(0xFFE91E63); // Hồng đậm
+        return _colorForKey('high');
       } else {
-        return const Color(0xFF9C27B0); // Tím
+        return _colorForKey('severe');
       }
     }
 
     // Mặc định
-    return const Color(0xFF2196F3); // Xanh dương
+    return _colorForKey('default');
   }
 
-  double _getStrokeWidth(Map<String, dynamic> properties) {
+  double _getStrokeWidth(Map<String, dynamic> properties, String? highway) {
+    // Độ rộng cơ bản dựa trên loại highway
+    double baseWidth = 2.5;
+    
+    if (highway != null) {
+      switch (highway) {
+        case 'motorway':
+        case 'trunk':
+          baseWidth = 4.0;
+          break;
+        case 'primary':
+          baseWidth = 3.5;
+          break;
+        case 'secondary':
+          baseWidth = 3.0;
+          break;
+        case 'tertiary':
+          baseWidth = 2.5;
+          break;
+        case 'residential':
+        case 'living_street':
+        case 'unclassified':
+          baseWidth = 2.0;
+          break;
+        default:
+          baseWidth = 2.5;
+      }
+    }
+
+    // Điều chỉnh dựa trên mức độ tắc nghẽn
     final congestionLevel = properties['congestion_level'] as String?;
     if (congestionLevel != null) {
       switch (congestionLevel.toLowerCase()) {
         case 'severe':
         case 'high':
-          return 6.0; // Tăng mạnh từ 6.0
+          return baseWidth + 1.0; // Tăng thêm cho đường tắc
         case 'medium':
-          return 5.0; // Tăng từ 5.0
+          return baseWidth + 0.5;
         default:
-          return 4.0; // Tăng từ 4.0
+          return baseWidth;
       }
     }
-    return 4.5; // Tăng từ 4.5
+    return baseWidth;
   }
 
   @override
@@ -261,6 +316,12 @@ class _HanoiMapPageState extends State<HanoiMapPage> {
               onMapReady: () {
                 print('Map ready, loading traffic data');
                 loadTrafficData();
+              },
+              onPositionChanged: (position, hasGesture) {
+                if (hasGesture) {
+                  // Reload data when user pans or zooms
+                  loadTrafficData();
+                }
               },
             ),
             children: [
@@ -354,10 +415,10 @@ class _HanoiMapPageState extends State<HanoiMapPage> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _LegendItem(color: const Color(0xFF00BCD4), label: 'Thông thoáng'),
-            _LegendItem(color: const Color(0xFFFF9800), label: 'Hơi tắc'),
-            _LegendItem(color: const Color(0xFFE91E63), label: 'Tắc'),
-            _LegendItem(color: const Color(0xFF9C27B0), label: 'Tắc nghẽn'),
+            _LegendItem(color: _colorForKey('low'), label: 'Thông thoáng'),
+            _LegendItem(color: _colorForKey('medium'), label: 'Hơi tắc'),
+            _LegendItem(color: _colorForKey('high'), label: 'Tắc'),
+            _LegendItem(color: _colorForKey('severe'), label: 'Tắc nghẽn'),
             const SizedBox(height: 16),
             const Text(
               'Dữ liệu tự động cập nhật mỗi 30 giây',
@@ -382,6 +443,82 @@ class _HanoiMapPageState extends State<HanoiMapPage> {
     } catch (e) {
       return isoTime;
     }
+  }
+
+  Map<String, Color>? _parseColorMetadata(dynamic metadata) {
+    if (metadata is Map<String, dynamic>) {
+      final colorConfig = metadata['color_config'];
+      if (colorConfig is Map) {
+        final parsed = <String, Color>{};
+        colorConfig.forEach((key, value) {
+          final color = _colorFromHex(value?.toString());
+          if (key is String && color != null) {
+            parsed[key.toLowerCase()] = color;
+          }
+        });
+        return parsed.isEmpty ? null : parsed;
+      }
+    }
+    return null;
+  }
+
+  Color? _colorFromHex(String? hex) {
+    if (hex == null) return null;
+    final normalized = hex.trim().replaceFirst('#', '');
+    if (normalized.length != 6 && normalized.length != 8) return null;
+    final buffer = StringBuffer();
+    if (normalized.length == 6) buffer.write('FF');
+    buffer.write(normalized);
+    final value = int.tryParse(buffer.toString(), radix: 16);
+    if (value == null) return null;
+    return Color(value);
+  }
+
+  Color _colorForKey(String key) {
+    return _colorConfig[key.toLowerCase()] ?? _colorConfig['default']!;
+  }
+
+  Polyline? _buildPolyline(List coordinates, Map<String, dynamic> properties) {
+    final points = coordinates
+        .map((coord) {
+          if (coord is List && coord.length >= 2) {
+            final lon = (coord[0] as num).toDouble();
+            final lat = (coord[1] as num).toDouble();
+            return LatLng(lat, lon);
+          }
+          return null;
+        })
+        .whereType<LatLng>()
+        .toList();
+
+    if (points.length < 2) {
+      return null;
+    }
+
+    final highway = properties['highway'] as String?;
+    final oneway = _parseOneway(properties['oneway']);
+    final color = _getColorForTraffic(properties);
+    final strokeWidth = _getStrokeWidth(properties, highway);
+
+    return Polyline(
+      points: points,
+      strokeWidth: strokeWidth,
+      color: color,
+      borderColor: Colors.white.withOpacity(oneway ? 0.5 : 0.3),
+      borderStrokeWidth: 0.5,
+    );
+  }
+
+  bool _parseOneway(dynamic value) {
+    if (value is bool) return value;
+    if (value is String) {
+      final normalized = value.toLowerCase();
+      return normalized == 'true' || normalized == 't' || normalized == '1';
+    }
+    if (value is num) {
+      return value != 0;
+    }
+    return false;
   }
 }
 

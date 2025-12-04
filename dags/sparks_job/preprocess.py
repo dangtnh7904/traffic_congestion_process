@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from pyspark.sql import SparkSession
-    from pyspark.sql.functions import col, lit, greatest, least, when, flatten, transform
+    from pyspark.sql.functions import col, lit, greatest, least, when
 
 except ImportError as e:
     logger.error("Required modules are not installed. Please install the necessary packages to run this script.")
@@ -54,9 +54,9 @@ def run_spark_job(spark: SparkSession, input_path: str, output_path: str):
         .filter(col("traverse_length") > 0)\
         .filter(col("freeFlowSpeed").isNotNull() & (col("freeFlowSpeed") > 0))
     
-    #remove null street names
-    clean_df = clean_df\
-        .filter(col("street_name").isNotNull() & (col("street_name") != ""))
+    # #remove null street names
+    # clean_df = clean_df\
+    #     .filter(col("street_name").isNotNull() & (col("street_name") != ""))
     
     # Fill missing traversability with default value "open"
     clean_df = clean_df.fillna({"traversability": "open"})
@@ -122,5 +122,3 @@ if __name__ == "__main__":
     finally:
         # Stop Spark session 
         spark.stop()
-
-    

@@ -2,66 +2,66 @@ from airflow import DAG
 from airflow.decorators import dag, task
 from datetime import datetime, timedelta
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
-from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from spark_config import (
     SPARK_S3_CONFIG, 
     SPARK_SEDONA_CONFIG,
     SPARK_S3_PACKAGES, 
-    SPARK_S3_POSTGRES_PACKAGES,
     SPARK_S3_POSTGRES_SEDONA_PACKAGES,
     SPARK_CONN_ID, 
-    SPARK_DEPLOY_MODE
+    SPARK_DEPLOY_MODE,
+    get_postgres_env_vars
 )
 import logging
-
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 POSTGRES_CONN_ID = 'postgres_traffic_db'
-PROCESS_FILE= 'dags/sparks_job/preprocess.py'
-ENGINEER_FILE= 'dags/sparks_job/feature_app_data.py'
-MY_BUCKET_NAME = "traffic-congestion"
 MINIO_CONN_ID = "minio_traffic_data"
 
+PROCESS_FILE= 'dags/sparks_job/preprocess.py'
+ENGINEER_FILE= 'dags/sparks_job/engineer_feature_data.py'
 
-db_label_table = "street_labels"
-db_traffic_table = "traffic_events"
+MY_BUCKET_NAME = "traffic-congestion"
+
+# Database table names
+db_static_road_segments_table = "road_segments"
+db_traffic_status_table = "traffic_events"
 
 default_args = {
     'owner': 'airflow',
     'retries': True,
-    'retry_delay': 60,
+    'retry_delay': timedelta(minutes=1),
 }
 
 @dag(
-    dag_id='process_traffic_data_dagv12',
+    dag_id='process_traffic_data_dagv1',
     default_args=default_args,
     description='DAG to process traffic data using Spark jobs',
-    schedule_interval=timedelta(seconds=360), 
-    start_date=None,
+    schedule=timedelta(days=1), 
+    start_date=(datetime(2025, 11, 11)),
     catchup=False,
+    # backfill=False,
     tags=['traffic', 'spark', 'data_processing'],
 )
 
 def process_traffic_data_dag():
-    
-    #get postgres connection details
-    @task(task_id='get_postgres_connection_details')
-    def get_postgres_connection_details() -> dict:
-        pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
-        conn = pg_hook.get_connection(POSTGRES_CONN_ID)
-        jdbc_url = f"jdbc:postgresql://{conn.host}:{conn.port}/{conn.schema}"
-        db_user = conn.login
-        db_password = conn.password
-        return {
-            "jdbc_url": jdbc_url,
-            "db_user": db_user,
-            "db_password": db_password,
-        }
-    
-    conn_details = get_postgres_connection_details()
 
+    # create dynamic s3 config with access key and secret key
+    dynamic_s3_config = SPARK_S3_CONFIG.copy()
+    dynamic_s3_config.update({
+        # get rid of top-level conn reference error by using f-string
+        # via jinja templating
+        'spark.hadoop.fs.s3a.access.key': f"{{{{ conn.{MINIO_CONN_ID}.login }}}}",
+        'spark.hadoop.fs.s3a.secret.key': f"{{{{ conn.{MINIO_CONN_ID}.password }}}}"
+    })
+
+    # create dynamic sedona config by merging s3 config
+    dynamic_sedona_config = SPARK_SEDONA_CONFIG.copy()
+    # Merge S3 config into Sedona config
+    dynamic_sedona_config.update(dynamic_s3_config)
+
+    
+    # fetch data task
     @task(task_id='fetch_data_task')
     def fetch_data_task():
         from tasks.fetch_hanoi_traffic_data import fetch_hanoi_traffic_data
@@ -86,18 +86,18 @@ def process_traffic_data_dag():
 
     # retrieve s3 raw path
     s3_raw_path = fetch_data_task()
-
     # get s3 processed path
     s3_process_path = get_s3_process_path(s3_raw_path)
-    
     # get s3 feature path
     s3_feature_path = get_s3_feature_path(s3_raw_path)
     
+
+    # spark task 1
     preprocess_task = SparkSubmitOperator(
         task_id='preprocess_traffic_data',
         application=PROCESS_FILE,
         conn_id=SPARK_CONN_ID,
-        conf=SPARK_S3_CONFIG,
+        conf=dynamic_s3_config,
         packages=SPARK_S3_PACKAGES,
         deploy_mode=SPARK_DEPLOY_MODE,
         application_args = [
@@ -107,24 +107,26 @@ def process_traffic_data_dag():
     )
 
 
-    feature_app_data = SparkSubmitOperator(
+    engine_feature_data = SparkSubmitOperator(
         task_id='engineer_feature_data',
         application=ENGINEER_FILE,
         conn_id=SPARK_CONN_ID,
-        conf=SPARK_SEDONA_CONFIG,  # Use Sedona config for GIS functions
+        conf=dynamic_sedona_config,  # Use Sedona config for GIS functions
         packages=SPARK_S3_POSTGRES_SEDONA_PACKAGES,  # Include Sedona packages
         deploy_mode=SPARK_DEPLOY_MODE,
+        env_vars=get_postgres_env_vars(POSTGRES_CONN_ID),
+        
         application_args = [
-            "--input_path", s3_process_path,  # Read from processed
-            "--output_path", s3_feature_path,  # Write to features (different path!)
-            "--jdbc_url", "{{ task_instance.xcom_pull(task_ids='get_postgres_connection_details')['jdbc_url'] }}",
-            "--db_user", "{{ task_instance.xcom_pull(task_ids='get_postgres_connection_details')['db_user'] }}",
-            "--db_password", "{{ task_instance.xcom_pull(task_ids='get_postgres_connection_details')['db_password'] }}",
-            "--db_label_table", db_label_table,
-            "--db_traffic_table", db_traffic_table
+            "--input_path", s3_process_path,
+            "--output_path", s3_feature_path,
+            "--jdbc_url", f"jdbc:postgresql://{{{{ conn.{POSTGRES_CONN_ID}.host }}}}:{{{{ conn.{POSTGRES_CONN_ID}.port }}}}/{{{{ conn.{POSTGRES_CONN_ID}.schema }}}}",
+            "--db_user", f"{{{{ conn.{POSTGRES_CONN_ID}.login }}}}",
+            "--db_password", f"{{{{ conn.{POSTGRES_CONN_ID}.password }}}}",
+            "--db_static_road_segments_table", db_static_road_segments_table,
+            "--db_traffic_status_table", db_traffic_status_table
         ]
     )
 
-    conn_details >> s3_raw_path >> s3_process_path >> s3_feature_path >> preprocess_task >> feature_app_data
+    preprocess_task >> engine_feature_data
 
 process_traffic_data_dag()

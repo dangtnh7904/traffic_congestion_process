@@ -22,3 +22,17 @@ SPARK_S3_POSTGRES_SEDONA_PACKAGES = 'org.apache.hadoop:hadoop-aws:3.3.4,com.amaz
 
 SPARK_CONN_ID = 'spark_default'
 SPARK_DEPLOY_MODE = 'client'
+
+# Utility function to get Postgres environment variables with Jinja templating
+def get_postgres_env_vars(conn_id):
+    """
+    Tạo dictionary chứa Jinja Template cho biến môi trường DB.
+    Airflow sẽ tự điền giá trị thật vào lúc chạy (Runtime).
+    """
+    return {
+        "DB_USER": f"{{{{ conn.{conn_id}.login }}}}",
+        "DB_PASSWORD": f"{{{{ conn.{conn_id}.password }}}}",
+        "DB_HOST": f"{{{{ conn.{conn_id}.host }}}}",
+        "DB_PORT": f"{{{{ conn.{conn_id}.port }}}}",
+        "DB_SCHEMA": f"{{{{ conn.{conn_id}.schema }}}}"
+    }
